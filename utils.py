@@ -1,4 +1,5 @@
 import re
+import os
 import string
 import numpy as np
 from typing import List, Dict, Union
@@ -18,18 +19,20 @@ from load_dataset import load_locomo_dataset, QA, Turn, Session, Conversation
 from sentence_transformers.util import pytorch_cos_sim
 
 # Download required NLTK data
-try:
-    nltk.download('punkt', quiet=True)
-    nltk.download('wordnet', quiet=True)
-except Exception as e:
-    print(f"Error downloading NLTK data: {e}")
+if not os.getenv("AMEM_LIGHT_METRICS"):
+    try:
+        nltk.download('punkt', quiet=True)
+        nltk.download('wordnet', quiet=True)
+    except Exception as e:
+        print(f"Error downloading NLTK data: {e}")
 
 # Initialize SentenceTransformer model (this will be reused)
-try:
-    sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
-except Exception as e:
-    print(f"Warning: Could not load SentenceTransformer model: {e}")
-    sentence_model = None
+sentence_model = None
+if not os.getenv("AMEM_LIGHT_METRICS"):
+    try:
+        sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
+    except Exception as e:
+        print(f"Warning: Could not load SentenceTransformer model: {e}")
 
 def simple_tokenize(text):
     """Simple tokenization function."""
@@ -108,6 +111,16 @@ def calculate_sentence_similarity(prediction: str, reference: str) -> float:
 
 def calculate_metrics(prediction: str, reference: str) -> Dict[str, float]:
     """Calculate comprehensive evaluation metrics for a prediction."""
+    if os.getenv("AMEM_LIGHT_METRICS"):
+        pred_tokens = set(simple_tokenize(prediction or ""))
+        ref_tokens = set(simple_tokenize(reference or ""))
+        common = pred_tokens & ref_tokens
+        precision = len(common) / len(pred_tokens) if pred_tokens else 0.0
+        recall = len(common) / len(ref_tokens) if ref_tokens else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+        return {"exact_match": int(bool(prediction and reference) and
+                                   str(prediction).strip().lower() == str(reference).strip().lower()),
+                "f1": f1}
     # Handle empty or None values
     if not prediction or not reference:
         return {

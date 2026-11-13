@@ -30,24 +30,30 @@ from collections import defaultdict
 import copy
 import pickle
 import random
+import hashlib
 from tqdm import tqdm
 from utils import calculate_metrics, aggregate_metrics, score_prediction
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 # Download required NLTK data
-try:
-    nltk.data.find('tokenizers/punkt')
-    nltk.data.find('wordnet')
-except LookupError:
-    nltk.download('punkt')
-    nltk.download('wordnet')
+if not os.getenv("AMEM_LIGHT_METRICS"):
+    try:
+        nltk.data.find('tokenizers/punkt')
+        nltk.data.find('wordnet')
+    except LookupError:
+        nltk.download('punkt')
+        nltk.download('wordnet')
 
 # Initialize SentenceTransformer model (this will be reused)
-try:
-    sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
-except Exception as e:
-    print(f"Warning: Could not load SentenceTransformer model: {e}")
-    sentence_model = None
+sentence_model = None
+if not os.getenv("AMEM_LIGHT_METRICS"):
+    try:
+        sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
+    except Exception as e:
+        print(f"Warning: Could not load SentenceTransformer model: {e}")
 
 logger = logging.getLogger("amem_robust")
 
@@ -207,7 +213,8 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                      temperature_c5: float = 0.5, retrieve_k: int = 10,
                      sglang_host: str = "http://localhost", sglang_port: int = 30000,
                      legacy_c5_reference: bool = False, seed: int = 42,
-                     refresh_index: bool = False, memory_scope: str = "conversation"):
+                     refresh_index: bool = False, memory_scope: str = "conversation",
+                     max_questions: Optional[int] = None):
     """Evaluate the robust agent on the LoComo dataset."""
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
     log_filename = f"eval_robust_{model}_{backend}_ratio{ratio}_{memory_scope}_{timestamp}.log"
@@ -235,9 +242,14 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
 
     i = 0
     error_num = 0
+    dataset_fingerprint = hashlib.sha256(Path(dataset_path).read_bytes()).hexdigest()[:12]
+    embedding_backend = os.getenv("AMEM_EMBEDDING_BACKEND", "sentence-transformers")
     memories_dir = os.path.join(
         os.path.dirname(__file__),
-        "cached_memories_robust_{}_{}{}".format(backend, model, "_refresh" if refresh_index else ""),
+        "cached_memories_robust_{}_{}_{}_{}{}".format(
+            backend, model, embedding_backend, dataset_fingerprint,
+            "_refresh" if refresh_index else ""
+        ),
     )
     os.makedirs(memories_dir, exist_ok=True)
     allow_categories = [1, 2, 3, 4, 5]
@@ -298,11 +310,15 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                          f"from {len(samples)} conversations")
 
     for sample_idx, sample in enumerate(samples):
+        if max_questions is not None and total_questions >= max_questions:
+            break
         agent = pooled_agent if memory_scope == "pooled" else load_or_build(sample_idx, sample)
 
         eval_logger.info(f"Processing sample {sample_idx + 1}/{len(samples)}")
 
         for qa_idx, qa in enumerate(sample.qa):
+            if max_questions is not None and total_questions >= max_questions:
+                break
             if int(qa.category) in allow_categories:
                 total_questions += 1
                 category_counts[qa.category] += 1
@@ -330,6 +346,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
 
                 result = {
                     "sample_id": sample_idx,
+                    "qa_index": qa_idx,
                     "question": qa.question,
                     "prediction": prediction,
                     "reference": reference,
@@ -346,6 +363,11 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
 
     final_results = {
         "model": model,
+        "backend": backend,
+        "embedding_backend": embedding_backend,
+        "metric_set": "f1_exact" if os.getenv("AMEM_LIGHT_METRICS") else "full",
+        "retrieve_k": retrieve_k,
+        "max_questions": max_questions,
         "dataset": dataset_path,
         "memory_layer": "robust",
         "total_questions": total_questions,
@@ -403,12 +425,14 @@ def main():
                         help="Path to save evaluation results")
     parser.add_argument("--ratio", type=float, default=1.0,
                         help="Ratio of dataset to evaluate (0.0 to 1.0)")
-    parser.add_argument("--backend", type=str, default="openai",
-                        help="Backend to use (openai, ollama, sglang, or vllm)")
+    parser.add_argument("--backend", choices=["openai", "deepseek", "ollama", "sglang", "vllm"],
+                        default="openai", help="LLM backend")
     parser.add_argument("--temperature_c5", type=float, default=0.5,
                         help="Temperature for category 5 questions")
     parser.add_argument("--retrieve_k", type=int, default=10,
                         help="Number of memories to retrieve")
+    parser.add_argument("--max_questions", type=int, default=None,
+                        help="Stop after this many questions, using dataset order (for a small paired experiment)")
     parser.add_argument("--sglang_host", type=str, default="http://localhost",
                         help="SGLang server host (for sglang backend)")
     parser.add_argument("--sglang_port", type=int, default=30000,
@@ -431,6 +455,8 @@ def main():
 
     if args.ratio <= 0.0 or args.ratio > 1.0:
         raise ValueError("Ratio must be between 0.0 and 1.0")
+    if args.retrieve_k <= 0 or (args.max_questions is not None and args.max_questions <= 0):
+        raise ValueError("retrieve_k and max_questions must be positive")
 
     dataset_path = os.path.join(os.path.dirname(__file__), args.dataset)
     output_path = os.path.join(os.path.dirname(__file__), args.output) if args.output else None
@@ -439,7 +465,7 @@ def main():
         dataset_path, args.model, output_path, args.ratio,
         args.backend, args.temperature_c5, args.retrieve_k,
         args.sglang_host, args.sglang_port, args.legacy_c5_reference, args.seed,
-        args.refresh_index, args.memory_scope,
+        args.refresh_index, args.memory_scope, args.max_questions,
     )
 
 

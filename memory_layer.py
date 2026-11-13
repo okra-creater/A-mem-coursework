@@ -6,6 +6,7 @@ from datetime import datetime
 import uuid
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
+from offline_encoder import HashingSentenceEncoder
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 import os
@@ -611,7 +612,8 @@ class SimpleEmbeddingRetriever:
         Args:
             model_name: Name of the SentenceTransformer model to use
         """
-        self.model = SentenceTransformer(model_name)
+        self.model = (HashingSentenceEncoder() if os.getenv("AMEM_EMBEDDING_BACKEND") == "hashing"
+                      else SentenceTransformer(model_name))
         self.corpus = []
         self.embeddings = None
         self.document_ids = {}  # Map document content to its index

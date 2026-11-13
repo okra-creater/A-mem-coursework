@@ -130,6 +130,60 @@ bash run_k_sweep.sh
 * Category 4: Single-hop
 * Category 5: Adversarial
 
+## Small reproducibility experiment (coursework)
+
+**Question:** On the same LoCoMo questions, what changes when the number of
+retrieved memories is reduced from 10 to 5? The sole experimental change is
+`retrieve_k`. The added `--max_questions` option limits evaluation to a fixed
+prefix of questions; `qa_index` in each output lets the comparison script verify
+that both runs scored the same questions.
+
+Use Python 3.9+ and install `requirements.txt` into a virtual environment
+(`python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt`).
+For DeepSeek, create a `.env`
+file in the repository root containing `DEEPSEEK_API_KEY=your_key` (the file is
+Git-ignored). `test_advanced_robust.py` loads this file automatically. The
+DeepSeek backend uses `https://api.deepseek.com`, model `deepseek-flash`,
+non-thinking mode, `max_tokens=1000`, and the evaluation's existing
+temperature settings (0.7 normally; 0.5 for category 5). The first run builds
+memory for 35 turns from two LoCoMo sessions and may make paid model calls.
+The second run reuses the memory cache. Choose a model you can access and use
+the **same** model in both commands.
+
+When Hugging Face model downloads are unavailable, the commands below use a
+deterministic local hashing encoder and compute only token F1 and exact match.
+This is an explicit environment adaptation: retrieval quality may differ from
+the paper's sentence-transformer setup. Together with the DeepSeek model
+switch, it makes the measured values **not directly comparable** to the
+paper's published numbers. Both k settings still use the same adapted pipeline.
+
+```bash
+mkdir -p results_coursework
+export AMEM_EMBEDDING_BACKEND=hashing AMEM_LIGHT_METRICS=1
+.venv/bin/python make_coursework_subset.py
+.venv/bin/python test_advanced_robust.py --backend deepseek --model deepseek-flash \
+  --dataset results_coursework/subset.json --max_questions 10 \
+  --retrieve_k 10 --seed 42 --output results_coursework/k10.json
+.venv/bin/python test_advanced_robust.py --backend deepseek --model deepseek-flash \
+  --dataset results_coursework/subset.json --max_questions 10 \
+  --retrieve_k 5 --seed 42 --output results_coursework/k5.json
+.venv/bin/python compare_retrieval_k.py results_coursework/k10.json \
+  results_coursework/k5.json --output results_coursework/comparison.md
+```
+
+For stochastic results, repeat the paired experiment with separate output
+names and seeds, then report the mean and variation across 3–5 trials. Keep
+the model, dataset, question set, scoring settings, and memory cache fixed
+within each pair. The comparison script rejects mismatched questions,
+settings, or runs with absorbed LLM failures. The subset is deterministically
+drawn from the first LoCoMo conversation: two sessions and ten questions whose
+evidence is in those sessions. Its generated JSON has a separate cache keyed
+by dataset content, so it cannot reuse memory from a full-dataset run. A
+10-question subset is a
+pipeline check and a small experiment; its scores are **not** directly
+comparable with a paper result on the full LoCoMo dataset. Record the paper's
+reported number and evaluation settings separately in your report.
+
 For more details about the categories, please refer to [this GitHub issue](https://github.com/snap-research/locomo/issues/6). 
 
 ## Citation 📚

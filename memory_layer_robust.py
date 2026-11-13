@@ -121,6 +121,39 @@ class RobustOpenAIController(RobustBaseLLMController):
         return response.choices[0].message.content
 
 
+class RobustDeepSeekController(RobustBaseLLMController):
+    """DeepSeek's OpenAI-compatible chat endpoint, with thinking disabled.
+
+    Non-thinking mode keeps the temperature settings used by this evaluation
+    meaningful and avoids a hidden change to the decoding protocol.
+    """
+
+    def __init__(self, model: str = "deepseek-flash", api_key: Optional[str] = None):
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise ImportError("OpenAI package not found. Install requirements.txt") from exc
+        api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
+        if not api_key:
+            raise ValueError("DeepSeek API key not found. Set DEEPSEEK_API_KEY in .env or the environment.")
+        self.model = model
+        self.client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+
+    @retry_llm_call(max_retries=2)
+    def get_completion(self, prompt: str, temperature: float = 0.7) -> str:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": self.SYSTEM_MESSAGE},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=temperature,
+            max_tokens=1000,
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+        return response.choices[0].message.content
+
+
 class RobustOllamaController(RobustBaseLLMController):
     """Direct Ollama library controller (no LiteLLM proxy)."""
 
@@ -244,7 +277,7 @@ class RobustLLMController:
     """Factory that selects the right robust LLM controller."""
 
     def __init__(self,
-                 backend: Literal["openai", "ollama", "sglang", "vllm"] = "sglang",
+                 backend: Literal["openai", "deepseek", "ollama", "sglang", "vllm"] = "sglang",
                  model: str = "gpt-4",
                  api_key: Optional[str] = None,
                  api_base: Optional[str] = None,
@@ -253,6 +286,8 @@ class RobustLLMController:
                  check_connection: bool = False):
         if backend == "openai":
             self.llm = RobustOpenAIController(model, api_key)
+        elif backend == "deepseek":
+            self.llm = RobustDeepSeekController(model, api_key)
         elif backend == "ollama":
             self.llm = RobustOllamaController(model)
         elif backend == "sglang":
@@ -260,7 +295,7 @@ class RobustLLMController:
         elif backend == "vllm":
             self.llm = RobustVLLMController(model, sglang_host, sglang_port)
         else:
-            raise ValueError("Backend must be 'openai', 'ollama', 'sglang', or 'vllm'")
+            raise ValueError("Backend must be 'openai', 'deepseek', 'ollama', 'sglang', or 'vllm'")
 
         # an empty completion falls back to defaults downstream (heuristic metadata, no evolution, an empty
         # prediction): count it, so a run with many of them does not look like a clean low score
